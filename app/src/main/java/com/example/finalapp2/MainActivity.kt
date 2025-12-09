@@ -1,5 +1,27 @@
 package com.example.finalapp2
 
+//TODO
+/*
+C) Web server (Part 2 #5)
+
+✔ Express / Flask / Kotlin Ktor
+✔ “/” privacy policy page
+✔ photo list
+✔ clear-history endpoint
+
+D) Play Store listing documents (Part 2 #3)
+
+✔ Short description
+✔ Full description
+✔ 3 mock screenshots (phone + tablet)
+✔ All questionnaire answers
+
+E) Signed APK instructions (Part 2 #4)
+
+✔ Android Studio steps
+✔ common theme file
+ */
+
 // MainActivity.kt
 import android.Manifest
 import android.bluetooth.BluetoothAdapter
