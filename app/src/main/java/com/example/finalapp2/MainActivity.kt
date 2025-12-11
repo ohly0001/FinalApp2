@@ -124,7 +124,7 @@ interface SensorHistoryDao {
     suspend fun clearAll()
 }
 
-@Database(entities = [SensorHistory::class], version = 1)
+@Database(entities = [SensorHistory::class], version = 1, exportSchema = true)
 abstract class AppDatabase : RoomDatabase() {
     abstract fun sensorHistoryDao(): SensorHistoryDao
 }
