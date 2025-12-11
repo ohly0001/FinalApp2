@@ -82,7 +82,6 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.lifecycle.lifecycleScope
-import androidx.room.*
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import kotlinx.coroutines.Dispatchers
@@ -95,14 +94,7 @@ import java.util.*
 import androidx.core.graphics.set
 import androidx.core.graphics.createBitmap
 
-
-///////////////////////////
-// ROOM DATABASE SETUP
-///////////////////////////
-
-@Entity
 data class SensorHistory(
-    @PrimaryKey(autoGenerate = true) val id: Int = 0,
     val deviceName: String,
     val uuid: String,
     val ambientLight: Float,
@@ -112,21 +104,65 @@ data class SensorHistory(
     val isRemote: Boolean = false
 )
 
-@Dao
-interface SensorHistoryDao {
-    @Insert
-    suspend fun insert(history: SensorHistory)
+///////////////////////////
+// LOCAL STORAGE MANAGER
+///////////////////////////
 
-    @Query("SELECT * FROM SensorHistory ORDER BY timestamp DESC")
-    suspend fun getAll(): List<SensorHistory>
+class LocalHistoryManager(private val context: ComponentActivity) {
+    private val fileName = "sensor_history.json"
 
-    @Query("DELETE FROM SensorHistory")
-    suspend fun clearAll()
-}
+    fun loadHistory(): List<SensorHistory> {
+        return try {
+            val file = File(context.filesDir, fileName)
+            if (!file.exists()) return emptyList()
+            val jsonString = file.readText()
+            val jsonArray = JSONObject("{\"array\":$jsonString}").getJSONArray("array")
+            List(jsonArray.length()) { i ->
+                val obj = jsonArray.getJSONObject(i)
+                SensorHistory(
+                    deviceName = obj.getString("deviceName"),
+                    uuid = obj.getString("uuid"),
+                    ambientLight = obj.getDouble("ambientLight").toFloat(),
+                    proximity = obj.getDouble("proximity").toFloat(),
+                    timestamp = obj.getLong("timestamp"),
+                    photoBase64 = obj.getString("photoBase64"),
+                    isRemote = obj.optBoolean("isRemote", false)
+                )
+            }
+        } catch (e: Exception) {
+            Log.e("LocalHistoryManager", "Failed to load history: ${e.localizedMessage}")
+            emptyList()
+        }
+    }
 
-@Database(entities = [SensorHistory::class], version = 1, exportSchema = true)
-abstract class AppDatabase : RoomDatabase() {
-    abstract fun sensorHistoryDao(): SensorHistoryDao
+    fun saveHistory(list: List<SensorHistory>) {
+        try {
+            val jsonArray = org.json.JSONArray()
+            list.forEach { item ->
+                val obj = JSONObject().apply {
+                    put("deviceName", item.deviceName)
+                    put("uuid", item.uuid)
+                    put("ambientLight", item.ambientLight)
+                    put("proximity", item.proximity)
+                    put("timestamp", item.timestamp)
+                    put("photoBase64", item.photoBase64)
+                    put("isRemote", item.isRemote)
+                }
+                jsonArray.put(obj)
+            }
+            File(context.filesDir, fileName).writeText(jsonArray.toString())
+        } catch (e: Exception) {
+            Log.e("LocalHistoryManager", "Failed to save history: ${e.localizedMessage}")
+        }
+    }
+
+    fun clearHistory() {
+        try {
+            File(context.filesDir, fileName).delete()
+        } catch (e: Exception) {
+            Log.e("LocalHistoryManager", "Failed to clear history: ${e.localizedMessage}")
+        }
+    }
 }
 
 ///////////////////////////
@@ -146,8 +182,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private val bluetoothAdapter: BluetoothAdapter? = BluetoothAdapter.getDefaultAdapter()
     private val appUuid: UUID = UUID.randomUUID()
 
-    private lateinit var db: AppDatabase
-
     private lateinit var permissionLauncher: ActivityResultLauncher<Array<String>>
     private val havePermissions = mutableStateOf(false)
 
@@ -155,6 +189,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     private var showQrDialog by mutableStateOf(false)
     private var qrBitmap by mutableStateOf<Bitmap?>(null)
+
+    private lateinit var historyManager: LocalHistoryManager
 
     private val cameraLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -174,10 +210,10 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         ) { permissions ->
             havePermissions.value = permissions.values.all { it }
         }
-
         requestPermissions()
 
-        db = Room.databaseBuilder(applicationContext, AppDatabase::class.java, "sensor-db").build()
+        historyManager = LocalHistoryManager(this)
+        connectedRemoteDevices.addAll(historyManager.loadHistory()) // load persisted history
 
         sensorManager = getSystemService(SENSOR_SERVICE) as SensorManager
         lightSensor = sensorManager.getDefaultSensor(Sensor.TYPE_LIGHT)
@@ -214,7 +250,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         qrBitmap = qrBitmap,
                         onDismissQr = { showQrDialog = false }
                     )
-                    1 -> HistoryPage(db, onClearHistory = { clearHistory() })
+                    1 -> HistoryPage(onClearHistory = { clearHistory() })
                 }
             }
         }
@@ -272,47 +308,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) {}
 
-    private fun takePhotoAndUpload() {
-        val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
-        cameraLauncher.launch(intent)
-
-        // Wait until thumbnail variable is set by the camera callback. In practice you may want to
-        // do this after receiving the thumbnail (e.g., via an explicit callback). For simplicity,
-        // we'll launch a coroutine that saves + uploads the currently available thumbnail.
-        lifecycleScope.launch {
-            thumbnail?.let { bmp ->
-                val baos = ByteArrayOutputStream()
-                bmp.compress(Bitmap.CompressFormat.JPEG, 80, baos)
-                val base64Photo = Base64.encodeToString(baos.toByteArray(), Base64.DEFAULT)
-
-                // save to local DB
-                val item = SensorHistory(
-                    deviceName = bluetoothAdapter?.name ?: "LocalDevice",
-                    uuid = appUuid.toString(),
-                    ambientLight = ambientLight,
-                    proximity = proximity,
-                    timestamp = System.currentTimeMillis(),
-                    photoBase64 = base64Photo,
-                    isRemote = false
-                )
-
-                db.sensorHistoryDao().insert(item)
-
-                // send to remote server
-                launch(Dispatchers.IO) {
-                    try {
-                        postToServer(item)
-                    } catch (e: Exception) {
-                        Log.e("MainActivity", "Upload failed: ${e.localizedMessage}")
-                    }
-                }
-            } ?: run {
-                // no thumbnail yet — in actual app you'd want to wait until camera result arrives.
-                Log.w("MainActivity", "No thumbnail available yet — press Take Photo and accept the camera preview")
-            }
-        }
-    }
-
     ///////////////////////////
     // BLUETOOTH SERVER
     ///////////////////////////
@@ -366,72 +361,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     serverSocket?.close()
                 } catch (ignored: IOException) {}
             }
-        }
-    }
-
-    /**
-     * Expect JSON messages from peer devices, one JSON object per line.
-     * JSON structure example:
-     * {
-     *  "deviceName":"Phone B",
-     *  "uuid":"some-uuid-string",
-     *  "ambientLight":123.4,
-     *  "proximity":0.0,
-     *  "photoBase64":"....",
-     *  "timestamp": 1630000000000
-     * }
-     */
-    @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
-    private fun handleConnectedSocket(socket: BluetoothSocket) {
-        val remoteDeviceName = socket.remoteDevice?.name ?: "Remote"
-        try {
-            val input = BufferedReader(InputStreamReader(socket.inputStream))
-            var line: String? = input.readLine()
-            while (line != null) {
-                Log.d("MainActivity", "Received line: $line")
-
-                // try parse JSON
-                try {
-                    val json = JSONObject(line)
-                    val deviceName = json.optString("deviceName", remoteDeviceName)
-                    val uuid = json.optString("uuid", "unknown")
-                    val ambient = json.optDouble("ambientLight", 0.0).toFloat()
-                    val prox = json.optDouble("proximity", 0.0).toFloat()
-                    val photoBase64 = json.optString("photoBase64", "")
-                    val ts = json.optLong("timestamp", System.currentTimeMillis())
-
-                    val remoteHistory = SensorHistory(
-                        deviceName = deviceName,
-                        uuid = uuid,
-                        ambientLight = ambient,
-                        proximity = prox,
-                        timestamp = ts,
-                        photoBase64 = photoBase64,
-                        isRemote = true
-                    )
-
-                    // update UI list on main thread
-                    lifecycleScope.launch(Dispatchers.Main) {
-                        connectedRemoteDevices.add(0, remoteHistory) // newest first
-                    }
-
-                    // also save into local DB
-                    lifecycleScope.launch(Dispatchers.IO) {
-                        db.sensorHistoryDao().insert(remoteHistory)
-                    }
-                } catch (je: Exception) {
-                    Log.e("MainActivity", "Invalid JSON from socket: ${je.localizedMessage}")
-                }
-
-                line = input.readLine()
-            }
-        } catch (e: IOException) {
-            Log.e("MainActivity", "Socket IO error: ${e.localizedMessage}")
-        } finally {
-            try {
-                socket.close()
-            } catch (ignored: IOException) {}
-            Log.i("MainActivity", "Socket closed for device $remoteDeviceName")
         }
     }
 
@@ -508,22 +437,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         }
     }
 
-    private fun clearHistory() {
-        lifecycleScope.launch(Dispatchers.IO) {
-            try {
-                db.sensorHistoryDao().clearAll()
-                // inform server too
-                requestServerClearHistory()
-                // update UI
-                lifecycleScope.launch(Dispatchers.Main) {
-                    connectedRemoteDevices.clear()
-                }
-            } catch (e: Exception) {
-                Log.e("MainActivity", "Failed to clear history: ${e.localizedMessage}")
-            }
-        }
-    }
-
     ///////////////////////////
     // QR CODE GENERATION
     ///////////////////////////
@@ -546,6 +459,88 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         } catch (e: Exception) {
             Log.e("MainActivity", "QR generation failed: ${e.localizedMessage}")
             null
+        }
+    }
+
+    private fun takePhotoAndUpload() {
+        val intent = Intent(MediaStore.ACTION_IMAGE_CAPTURE)
+        cameraLauncher.launch(intent)
+
+        lifecycleScope.launch {
+            thumbnail?.let { bmp ->
+                val baos = ByteArrayOutputStream()
+                bmp.compress(Bitmap.CompressFormat.JPEG, 80, baos)
+                val base64Photo = Base64.encodeToString(baos.toByteArray(), Base64.DEFAULT)
+
+                val item = SensorHistory(
+                    deviceName = bluetoothAdapter?.name ?: "LocalDevice",
+                    uuid = appUuid.toString(),
+                    ambientLight = ambientLight,
+                    proximity = proximity,
+                    timestamp = System.currentTimeMillis(),
+                    photoBase64 = base64Photo,
+                    isRemote = false
+                )
+
+                // add to local list and save
+                connectedRemoteDevices.add(0, item)
+                historyManager.saveHistory(connectedRemoteDevices.toList())
+
+                // send to remote server
+                launch(Dispatchers.IO) {
+                    try { postToServer(item) } catch (_: Exception) {}
+                }
+            }
+        }
+    }
+
+
+    /**
+     * Expect JSON messages from peer devices, one JSON object per line.
+     * JSON structure example:
+     * {
+     *  "deviceName":"Phone B",
+     *  "uuid":"some-uuid-string",
+     *  "ambientLight":123.4,
+     *  "proximity":0.0,
+     *  "photoBase64":"....",
+     *  "timestamp": 1630000000000
+     * }
+     */
+    @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
+    private fun handleConnectedSocket(socket: BluetoothSocket) {
+        val remoteDeviceName = socket.remoteDevice?.name ?: "Remote"
+        try {
+            val input = BufferedReader(InputStreamReader(socket.inputStream))
+            var line: String? = input.readLine()
+            while (line != null) {
+                try {
+                    val json = JSONObject(line)
+                    val remoteHistory = SensorHistory(
+                        deviceName = json.optString("deviceName", remoteDeviceName),
+                        uuid = json.optString("uuid", "unknown"),
+                        ambientLight = json.optDouble("ambientLight", 0.0).toFloat(),
+                        proximity = json.optDouble("proximity", 0.0).toFloat(),
+                        timestamp = json.optLong("timestamp", System.currentTimeMillis()),
+                        photoBase64 = json.optString("photoBase64", ""),
+                        isRemote = true
+                    )
+
+                    lifecycleScope.launch(Dispatchers.Main) {
+                        connectedRemoteDevices.add(0, remoteHistory)
+                        historyManager.saveHistory(connectedRemoteDevices.toList())
+                    }
+                } catch (_: Exception) {}
+                line = input.readLine()
+            }
+        } catch (_: Exception) {}
+    }
+
+    private fun clearHistory() {
+        lifecycleScope.launch(Dispatchers.IO) {
+            historyManager.clearHistory()
+            connectedRemoteDevices.clear()
+            requestServerClearHistory()
         }
     }
 }
@@ -637,13 +632,13 @@ fun MainPage(
 }
 
 @Composable
-fun HistoryPage(db: AppDatabase, onClearHistory: () -> Unit) {
+fun HistoryPage(onClearHistory: () -> Unit) {
     var historyList by remember { mutableStateOf<List<SensorHistory>>(emptyList()) }
     val scope = rememberCoroutineScope()
 
     LaunchedEffect(Unit) {
         scope.launch {
-            historyList = db.sensorHistoryDao().getAll()
+            //historyList = db.sensorHistoryDao().getAll()
         }
     }
 
@@ -651,7 +646,7 @@ fun HistoryPage(db: AppDatabase, onClearHistory: () -> Unit) {
         Row(modifier = Modifier.padding(8.dp)) {
             Button(onClick = {
                 scope.launch {
-                    db.sensorHistoryDao().clearAll()
+                    //db.sensorHistoryDao().clearAll()
                     onClearHistory()
                     historyList = emptyList()
                 }
