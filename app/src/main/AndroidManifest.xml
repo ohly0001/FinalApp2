@@ -9,6 +9,7 @@
     <uses-permission android:name="android.permission.BLUETOOTH_ADVERTISE" />
     <!-- Some devices / older recipes require location for discovery -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
 
     <application
         android:allowBackup="true"
@@ -22,7 +23,6 @@
         <activity
             android:name=".MainActivity"
             android:exported="true"
-            android:label="@string/app_name"
             android:theme="@style/Theme.FinalApp2">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
