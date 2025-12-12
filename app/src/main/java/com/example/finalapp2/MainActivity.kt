@@ -287,12 +287,16 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 val contents = result.data?.getStringExtra("SCAN_RESULT")
                 if (!contents.isNullOrBlank()) {
                     try {
-                        remoteUuid = UUID.fromString(contents)
+                        // QR now contains JSON with uuid + mac
+                        val qrJson = JSONObject(contents)
+                        val mac = qrJson.getString("mac")              // host device MAC
+                        val uuid = UUID.fromString(qrJson.getString("uuid")) // host UUID
+
                         lifecycleScope.launch(Dispatchers.IO) {
-                            connectToRemoteDevice(remoteUuid!!)
+                            connectToRemoteDevice(mac, uuid) // pass both
                         }
                     } catch (e: Exception) {
-                        Log.e("QR", "Invalid UUID scanned: ${e.localizedMessage}")
+                        Log.e("QR", "Invalid QR content: ${e.localizedMessage}")
                     }
                 }
             }
@@ -351,11 +355,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         scanningQr.value = false
                         try {
                             val qrJson = JSONObject(scannedValue)
-                            val mac = qrJson.getString("mac")
-                            val uuid = UUID.fromString(qrJson.getString("uuid"))
+                            val mac = qrJson.getString("mac")           // String
+                            val uuid = UUID.fromString(qrJson.getString("uuid"))  // UUID object
 
                             lifecycleScope.launch(Dispatchers.IO) {
-                                connectToRemoteDevice(mac, uuid)
+                                connectToRemoteDevice(mac, uuid)       // pass both parameters
                             }
                         } catch (e: Exception) {
                             Log.e("QR", "Invalid QR content: ${e.localizedMessage}")
@@ -503,23 +507,28 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         ]
     )
     private fun startBluetoothServerAndShowQr() {
-        bluetoothAdapter ?: return
+        val adapter = bluetoothAdapter ?: return
 
-        // spawn the server
+        // Start the server in a background coroutine
         lifecycleScope.launch(Dispatchers.IO) {
             startBluetoothServer()
         }
 
-        // generate QR for UUID + MAC
+        // Generate QR code containing both UUID and MAC
         lifecycleScope.launch {
-            val macAddress = bluetoothAdapter.address ?: "00:00:00:00:00:00"
-            val qrJson = JSONObject().apply {
-                put("uuid", appUuid.toString())
-                put("mac", macAddress)
+            try {
+                val macAddress = adapter.address ?: "00:00:00:00:00:00" // host MAC
+                val qrJson = JSONObject().apply {
+                    put("uuid", appUuid.toString())   // host UUID
+                    put("mac", macAddress)            // host MAC
+                }
+
+                val bitmap = generateQrBitmap(qrJson.toString())
+                qrBitmap = bitmap
+                showQrDialog = true
+            } catch (e: Exception) {
+                Log.e("MainActivity", "QR generation failed: ${e.localizedMessage}")
             }
-            val bitmap = generateQrBitmap(qrJson.toString())
-            qrBitmap = bitmap
-            showQrDialog = true
         }
     }
 
