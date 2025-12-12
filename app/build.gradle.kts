@@ -47,6 +47,11 @@ android {
 }
 
 dependencies {
+    implementation(libs.androidx.camera.camera2)
+    implementation(libs.androidx.camera.lifecycle)
+    implementation(libs.androidx.camera.view)
+    implementation(libs.androidx.camera.extensions)
+    implementation(libs.barcode.scanning)
     implementation(libs.json)
     implementation(libs.core)
     implementation(libs.androidx.core.ktx)

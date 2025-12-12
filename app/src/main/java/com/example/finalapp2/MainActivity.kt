@@ -47,6 +47,17 @@ that empties the device's local history of data transfers, and sends a "clear hi
 server to clear the server's history list. (2 marks)
  */
 
+import androidx.camera.core.CameraSelector
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
+import androidx.compose.foundation.layout.Box
+import androidx.compose.runtime.*
+import androidx.compose.ui.viewinterop.AndroidView
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.common.InputImage
+
 import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
@@ -56,6 +67,7 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
+import android.graphics.Color
 import android.hardware.Sensor
 import android.hardware.SensorEvent
 import android.hardware.SensorEventListener
@@ -70,6 +82,8 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresPermission
+import androidx.camera.core.ExperimentalGetImage
+import androidx.camera.core.Preview
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
@@ -103,15 +117,20 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.set
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.lifecycleScope
+import com.google.mlkit.vision.barcode.common.Barcode
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
 import java.io.BufferedWriter
@@ -168,7 +187,7 @@ class LocalHistoryManager(private val context: ComponentActivity) {
 
     fun saveHistory(list: List<SensorHistory>) {
         try {
-            val jsonArray = org.json.JSONArray()
+            val jsonArray = JSONArray()
             list.forEach { item ->
                 val obj = JSONObject().apply {
                     put("deviceName", item.deviceName)
@@ -228,6 +247,8 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var clientSocket: BluetoothSocket? = null
     private var remoteUuid: UUID? = null
     private var isClientActive = mutableStateOf(false)
+    private var scanningQr = mutableStateOf(false)
+    private var liveRemoteDevice by mutableStateOf<SensorHistory?>(null)
 
     private val cameraLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -238,9 +259,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         }
 
     private fun startQrScan() {
-        val intent = Intent("com.google.zxing.client.android.SCAN")
-        intent.putExtra("SCAN_MODE", "QR_CODE_MODE")
-        qrScanLauncher.launch(intent)
+        scanningQr.value = true
     }
 
     @OptIn(ExperimentalMaterial3Api::class)
@@ -305,6 +324,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         proximity,
                         thumbnail,
                         connectedRemoteDevices,
+                        liveRemoteDevice,
                         onTakePhoto = { takePhotoAndUpload() },
                         onStartServer = @RequiresPermission(
                             allOf = [
@@ -317,15 +337,30 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         showQrDialog = showQrDialog,
                         qrBitmap = qrBitmap,
                         onDismissQr = { showQrDialog = false },
-                        onScanQr = { startQrScan() },
-                        isClientActive.value
-                    )
-
+                        onScanQr = { scanningQr.value = true },
+                        isClientActive = isClientActive.value)
                     1 -> HistoryPage(
                         onClearHistory = { clearHistory() },
                         historyManager = historyManager
                     )
                 }
+            }
+
+            if (scanningQr.value) {
+                QrScanner(
+                    onQrScanned = { scannedUuid ->
+                        scanningQr.value = false
+                        try {
+                            remoteUuid = UUID.fromString(scannedUuid)
+                            lifecycleScope.launch(Dispatchers.IO) {
+                                connectToRemoteDevice(remoteUuid!!)
+                            }
+                        } catch (e: Exception) {
+                            Log.e("QR", "Invalid UUID scanned: ${e.localizedMessage}")
+                        }
+                    },
+                    onClose = { scanningQr.value = false }
+                )
             }
         }
     }
@@ -335,9 +370,12 @@ class MainActivity : ComponentActivity(), SensorEventListener {
         try {
             val adapter = bluetoothAdapter ?: return
 
-            // You may want to encode MAC into QR later, but for now pick *any bonded device*
+            // Pick any bonded device for demo purposes
             val device = adapter.bondedDevices.firstOrNull()
-                ?: return
+                ?: run {
+                    Log.e("BT-Client", "No bonded devices found to connect")
+                    return
+                }
 
             clientSocket = device.createRfcommSocketToServiceRecord(uuid)
             clientSocket?.connect()
@@ -345,13 +383,21 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             Log.i("BT-Client", "Connected to ${device.name}")
             isClientActive.value = true
 
-            // start streaming local sensor data to host
+            // Start streaming local sensors to the connected remote device
             lifecycleScope.launch(Dispatchers.IO) {
-                streamLocalSensorsToRemote(clientSocket!!)
+                clientSocket?.let { socket ->
+                    try {
+                        streamLocalSensorsToRemote(socket)
+                    } catch (e: Exception) {
+                        Log.e("BT-Client", "Streaming failed: ${e.localizedMessage}")
+                        isClientActive.value = false
+                    }
+                }
             }
 
         } catch (e: Exception) {
             Log.e("BT-Client", "Client connection failed: ${e.localizedMessage}")
+            isClientActive.value = false
         }
     }
 
@@ -378,7 +424,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 writer.write(json.toString() + "\n")
                 writer.flush()
 
-                kotlinx.coroutines.delay(300) // rate of sensor updates
+                delay(300) // rate of sensor updates
             }
         } catch (e: Exception) {
             Log.e("BT-Stream", "Stream ended: ${e.localizedMessage}")
@@ -603,7 +649,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                             x,
                             y
                         )
-                    ) android.graphics.Color.BLACK else android.graphics.Color.WHITE
+                    ) Color.BLACK else Color.WHITE
                 }
             }
             bmp
@@ -676,28 +722,24 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         proximity = json.optDouble("proximity", 0.0).toFloat(),
                         timestamp = json.optLong("timestamp", System.currentTimeMillis()),
                         photoBase64 = json.optString("photoBase64", ""),
-                        isRemote = true // marks this as remote
+                        isRemote = true
                     )
 
+                    // Update live remote device
+                    lifecycleScope.launch(Dispatchers.Main) {
+                        liveRemoteDevice = remoteHistory
+                    }
+
+                    // Optionally add to history list (if you want server posting)
                     lifecycleScope.launch(Dispatchers.Main) {
                         connectedRemoteDevices.add(0, remoteHistory)
                         historyManager.saveHistory(connectedRemoteDevices.toList())
                     }
 
-                    // post **only remote readings** to server automatically
-                    lifecycleScope.launch(Dispatchers.IO) {
-                        try {
-                            postToServer(remoteHistory)
-                        } catch (_: Exception) {
-                        }
-                    }
-
-                } catch (_: Exception) {
-                }
+                } catch (_: Exception) { }
                 line = input.readLine()
             }
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) { }
     }
 
     private fun clearHistory() {
@@ -724,6 +766,7 @@ fun MainPage(
     proximity: Float,
     thumbnail: Bitmap?,
     connectedRemoteDevices: SnapshotStateList<SensorHistory>,
+    liveRemoteDevice: SensorHistory?,
     onTakePhoto: () -> Unit,
     onStartServer: () -> Unit,
     uuid: String,
@@ -755,7 +798,8 @@ fun MainPage(
             Button(onClick = onTakePhoto) { Text("Take Photo & Upload") }
             Spacer(modifier = Modifier.width(8.dp))
             Button(onClick = onStartServer) { Text("Start Bluetooth Server & Show QR") }
-            Spacer(modifier = Modifier.width(8.dp))
+        }
+        Row {
             Button(onClick = onScanQr) { Text("Scan QR to Connect") }
             Spacer(modifier = Modifier.width(8.dp))
             Button(onClick = onClearHistory) { Text("Clear History (local + server)") }
@@ -763,6 +807,21 @@ fun MainPage(
 
         Spacer(modifier = Modifier.height(12.dp))
         Text("Bluetooth UUID: $uuid")
+
+        Spacer(modifier = Modifier.height(12.dp))
+        liveRemoteDevice?.let { remote ->
+            Text("Live Remote Device: ${remote.deviceName}", color = MaterialTheme.colorScheme.primary)
+            Text("Ambient Light: ${remote.ambientLight}")
+            Text("Proximity: ${remote.proximity}")
+            if (remote.photoBase64.isNotEmpty()) {
+                val bytes = Base64.decode(remote.photoBase64, Base64.DEFAULT)
+                val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                bmp?.let {
+                    Image(it.asImageBitmap(), contentDescription = "Remote Photo", modifier = Modifier.size(150.dp))
+                }
+            }
+            Spacer(modifier = Modifier.height(12.dp))
+        }
 
         Spacer(modifier = Modifier.height(20.dp))
         if (connectedRemoteDevices.isNotEmpty()) {
@@ -880,5 +939,61 @@ fun HistoryPage(
                 }
             }
         }
+    }
+}
+
+@androidx.annotation.OptIn(ExperimentalGetImage::class)
+@Composable
+fun QrScanner(
+    onQrScanned: (String) -> Unit,
+    onClose: () -> Unit
+) {
+    val context = LocalContext.current
+    val lifecycleOwner = LocalLifecycleOwner.current
+
+    Box {
+        AndroidView(factory = { ctx ->
+            val previewView = PreviewView(ctx)
+
+            val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
+            cameraProviderFuture.addListener({
+                val cameraProvider = cameraProviderFuture.get()
+                val preview = Preview.Builder().build()
+                preview.surfaceProvider = previewView.surfaceProvider
+
+                val barcodeScanner = BarcodeScanning.getClient()
+
+                val analyzer = ImageAnalysis.Builder().build().also { analysis ->
+                    analysis.setAnalyzer(ContextCompat.getMainExecutor(ctx)) { imageProxy: ImageProxy ->
+                        val mediaImage = imageProxy.image
+                        if (mediaImage != null) {
+                            val image = InputImage.fromMediaImage(mediaImage, imageProxy.imageInfo.rotationDegrees)
+                            barcodeScanner.process(image)
+                                .addOnSuccessListener { barcodes ->
+                                    for (barcode in barcodes) {
+                                        barcode.rawValue?.let { value ->
+                                            onQrScanned(value)
+                                            imageProxy.close()
+                                            return@addOnSuccessListener
+                                        }
+                                    }
+                                }
+                                .addOnFailureListener { }
+                                .addOnCompleteListener { imageProxy.close() }
+                        }
+                    }
+                }
+
+                try {
+                    val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+                    cameraProvider.unbindAll()
+                    cameraProvider.bindToLifecycle(lifecycleOwner, cameraSelector, preview, analyzer)
+                } catch (exc: Exception) {
+                    Log.e("QrScanner", "Camera bind failed: ${exc.localizedMessage}")
+                }
+            }, ContextCompat.getMainExecutor(ctx))
+
+            previewView
+        }, modifier = Modifier.fillMaxSize())
     }
 }
