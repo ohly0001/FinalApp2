@@ -76,6 +76,7 @@ import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.*
 import androidx.compose.runtime.*
+import androidx.compose.runtime.snapshots.SnapshotStateList
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
@@ -250,7 +251,10 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         qrBitmap = qrBitmap,
                         onDismissQr = { showQrDialog = false }
                     )
-                    1 -> HistoryPage(onClearHistory = { clearHistory() })
+                    1 -> HistoryPage(
+                        onClearHistory = { clearHistory() },
+                        historyManager = historyManager
+                    )
                 }
             }
         }
@@ -485,8 +489,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 )
 
                 // add to local list and save
-                connectedRemoteDevices.add(0, item)
-                historyManager.saveHistory(connectedRemoteDevices.toList())
+                addNewHistory(item)
 
                 // send to remote server
                 launch(Dispatchers.IO) {
@@ -545,6 +548,11 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             requestServerClearHistory()
         }
     }
+
+    private fun addNewHistory(item: SensorHistory) {
+        connectedRemoteDevices.add(0, item)
+        historyManager.saveHistory(connectedRemoteDevices.toList())
+    }
 }
 
 ///////////////////////////
@@ -556,7 +564,7 @@ fun MainPage(
     ambientLight: Float,
     proximity: Float,
     thumbnail: Bitmap?,
-    connectedRemoteDevices: List<SensorHistory>,
+    connectedRemoteDevices: SnapshotStateList<SensorHistory>,
     onTakePhoto: () -> Unit,
     onStartServer: () -> Unit,
     uuid: String,
@@ -565,8 +573,6 @@ fun MainPage(
     qrBitmap: Bitmap?,
     onDismissQr: () -> Unit
 ) {
-    val ctx = LocalContext.current
-
     Column(modifier = Modifier.padding(16.dp)) {
         Text("Local Device", style = MaterialTheme.typography.titleLarge)
         Spacer(modifier = Modifier.height(8.dp))
@@ -591,25 +597,7 @@ fun MainPage(
             Text("Connected Remote Devices", style = MaterialTheme.typography.titleMedium)
             LazyColumn {
                 items(connectedRemoteDevices) { item ->
-                    Card(modifier = Modifier
-                        .padding(8.dp)
-                        .fillMaxWidth()
-                    ) {
-                        Column(modifier = Modifier.padding(8.dp)) {
-                            Text("Device: ${item.deviceName}")
-                            Text("UUID: ${item.uuid}")
-                            Text("Timestamp: ${Date(item.timestamp)}")
-                            Text("Ambient Light: ${item.ambientLight}")
-                            Text("Proximity: ${item.proximity}")
-                            if (item.photoBase64.isNotEmpty()) {
-                                val bytes = Base64.decode(item.photoBase64, Base64.DEFAULT)
-                                val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
-                                bmp?.let {
-                                    Image(it.asImageBitmap(), contentDescription = null, modifier = Modifier.size(120.dp))
-                                }
-                            }
-                        }
-                    }
+                    DeviceCard(item)
                 }
             }
         }
@@ -634,21 +622,48 @@ fun MainPage(
 }
 
 @Composable
-fun HistoryPage(onClearHistory: () -> Unit) {
+fun DeviceCard(item: SensorHistory) {
+    Card(
+        modifier = Modifier
+            .padding(8.dp)
+            .fillMaxWidth()
+    ) {
+        Column(modifier = Modifier.padding(8.dp)) {
+            Text("Device: ${item.deviceName}")
+            Text("UUID: ${item.uuid}")
+            Text("Timestamp: ${Date(item.timestamp)}")
+            Text("Ambient Light: ${item.ambientLight}")
+            Text("Proximity: ${item.proximity}")
+            if (item.photoBase64.isNotEmpty()) {
+                val bytes = Base64.decode(item.photoBase64, Base64.DEFAULT)
+                val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
+                bmp?.let {
+                    Image(it.asImageBitmap(), contentDescription = null, modifier = Modifier.size(120.dp))
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun HistoryPage(
+    onClearHistory: () -> Unit,
+    historyManager: LocalHistoryManager
+) {
     var historyList by remember { mutableStateOf<List<SensorHistory>>(emptyList()) }
     val scope = rememberCoroutineScope()
 
+    // Load the history from file when the composable is first displayed
     LaunchedEffect(Unit) {
-        scope.launch {
-            //historyList = db.sensorHistoryDao().getAll()
-        }
+        historyList = historyManager.loadHistory()
     }
 
     Column {
         Row(modifier = Modifier.padding(8.dp)) {
             Button(onClick = {
                 scope.launch {
-                    //db.sensorHistoryDao().clearAll()
+                    // Clear history in file and in memory
+                    historyManager.clearHistory()
                     onClearHistory()
                     historyList = emptyList()
                 }
@@ -659,9 +674,10 @@ fun HistoryPage(onClearHistory: () -> Unit) {
 
         LazyColumn {
             items(historyList) { item ->
-                Card(modifier = Modifier
-                    .padding(8.dp)
-                    .fillMaxWidth()
+                Card(
+                    modifier = Modifier
+                        .padding(8.dp)
+                        .fillMaxWidth()
                 ) {
                     Column(modifier = Modifier.padding(8.dp)) {
                         Text("Device: ${item.deviceName}")
@@ -673,7 +689,11 @@ fun HistoryPage(onClearHistory: () -> Unit) {
                             val bytes = Base64.decode(item.photoBase64, Base64.DEFAULT)
                             val bmp = BitmapFactory.decodeByteArray(bytes, 0, bytes.size)
                             bmp?.let {
-                                Image(it.asImageBitmap(), contentDescription = null, modifier = Modifier.size(120.dp))
+                                Image(
+                                    it.asImageBitmap(),
+                                    contentDescription = null,
+                                    modifier = Modifier.size(120.dp)
+                                )
                             }
                         }
                     }
