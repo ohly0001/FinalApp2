@@ -47,17 +47,8 @@ that empties the device's local history of data transfers, and sends a "clear hi
 server to clear the server's history list. (2 marks)
  */
 
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.ImageProxy
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
-import androidx.compose.foundation.layout.Box
-import androidx.compose.runtime.*
-import androidx.compose.ui.viewinterop.AndroidView
-import com.google.mlkit.vision.barcode.BarcodeScanning
-import com.google.mlkit.vision.common.InputImage
-
+import androidx.compose.runtime.State
+import androidx.compose.runtime.mutableStateOf
 import android.Manifest
 import android.annotation.SuppressLint
 import android.bluetooth.BluetoothAdapter
@@ -74,6 +65,9 @@ import android.hardware.SensorEventListener
 import android.hardware.SensorManager
 import android.os.Build
 import android.os.Bundle
+import android.os.VibrationEffect
+import android.os.Vibrator
+import android.os.VibratorManager
 import android.provider.MediaStore
 import android.util.Base64
 import android.util.Log
@@ -82,10 +76,16 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.ActivityResultLauncher
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.annotation.RequiresPermission
+import androidx.camera.core.CameraSelector
 import androidx.camera.core.ExperimentalGetImage
+import androidx.camera.core.ImageAnalysis
+import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
+import androidx.camera.lifecycle.ProcessCameraProvider
+import androidx.camera.view.PreviewView
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -119,12 +119,15 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.core.content.ContextCompat.getSystemService
 import androidx.core.graphics.createBitmap
 import androidx.core.graphics.set
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.lifecycle.lifecycleScope
-import com.google.mlkit.vision.barcode.common.Barcode
+import com.google.mlkit.vision.barcode.BarcodeScanning
+import com.google.mlkit.vision.common.InputImage
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import kotlinx.coroutines.Dispatchers
@@ -248,7 +251,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     private var remoteUuid: UUID? = null
     private var isClientActive = mutableStateOf(false)
     private var scanningQr = mutableStateOf(false)
-    private var liveRemoteDevice by mutableStateOf<SensorHistory?>(null)
+    private val liveRemoteDevice = mutableStateOf<SensorHistory?>(null)
 
     private val cameraLauncher =
         registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -257,10 +260,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 thumbnail = photo
             }
         }
-
-    private fun startQrScan() {
-        scanningQr.value = true
-    }
 
     @OptIn(ExperimentalMaterial3Api::class)
     @SuppressLint("UnusedMaterial3ScaffoldPaddingParameter")
@@ -727,7 +726,7 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
                     // Update live remote device
                     lifecycleScope.launch(Dispatchers.Main) {
-                        liveRemoteDevice = remoteHistory
+                        liveRemoteDevice.value = remoteHistory
                     }
 
                     // Optionally add to history list (if you want server posting)
@@ -766,7 +765,7 @@ fun MainPage(
     proximity: Float,
     thumbnail: Bitmap?,
     connectedRemoteDevices: SnapshotStateList<SensorHistory>,
-    liveRemoteDevice: SensorHistory?,
+    liveRemoteDevice: State<SensorHistory?>,
     onTakePhoto: () -> Unit,
     onStartServer: () -> Unit,
     uuid: String,
@@ -809,7 +808,7 @@ fun MainPage(
         Text("Bluetooth UUID: $uuid")
 
         Spacer(modifier = Modifier.height(12.dp))
-        liveRemoteDevice?.let { remote ->
+        liveRemoteDevice.value?.let { remote ->
             Text("Live Remote Device: ${remote.deviceName}", color = MaterialTheme.colorScheme.primary)
             Text("Ambient Light: ${remote.ambientLight}")
             Text("Proximity: ${remote.proximity}")
