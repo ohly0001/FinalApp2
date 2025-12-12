@@ -380,14 +380,16 @@ class MainActivity : ComponentActivity(), SensorEventListener {
      * (Adapt URL to your server)
      */
     private fun postToServer(item: SensorHistory) {
-        val serverUrl = "https://your-server.example.com/upload" // adapt to your server
+        val serverUrl = "https://your-server.example.com/history" // updated endpoint
         val json = JSONObject().apply {
-            put("deviceName", item.deviceName)
-            put("uuid", item.uuid)
-            put("ambientLight", item.ambientLight)
-            put("proximity", item.proximity)
-            put("timestamp", item.timestamp)
-            put("photoBase64", item.photoBase64)
+            put("payload", JSONObject().apply {
+                put("deviceName", item.deviceName)
+                put("uuid", item.uuid)
+                put("ambientLight", item.ambientLight)
+                put("proximity", item.proximity)
+                put("timestamp", item.timestamp)
+                put("photoBase64", item.photoBase64)
+            })
         }
 
         var conn: HttpURLConnection? = null
@@ -409,7 +411,6 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             val responseCode = conn.responseCode
             Log.i("MainActivity", "Server response code: $responseCode")
 
-            // optionally read response
             val response = conn.inputStream.bufferedReader().use { it.readText() }
             Log.d("MainActivity", "Server response: $response")
         } catch (e: Exception) {
@@ -423,13 +424,13 @@ class MainActivity : ComponentActivity(), SensorEventListener {
      * Send "clear history" command to server. Server must expose an endpoint that clears server-side list.
      */
     private fun requestServerClearHistory() {
-        val serverUrl = "https://your-server.example.com/clear" // adapt to your server
+        val serverUrl = "https://your-server.example.com/history/all" // updated endpoint
         lifecycleScope.launch(Dispatchers.IO) {
             var conn: HttpURLConnection? = null
             try {
                 val url = URL(serverUrl)
                 conn = (url.openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
+                    requestMethod = "DELETE"
                     connectTimeout = 10_000
                     readTimeout = 10_000
                 }
@@ -485,13 +486,13 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                     proximity = proximity,
                     timestamp = System.currentTimeMillis(),
                     photoBase64 = base64Photo,
-                    isRemote = false
+                    isRemote = false // only local readings
                 )
 
                 // add to local list and save
                 addNewHistory(item)
 
-                // send to remote server
+                // send **only local readings** to server
                 launch(Dispatchers.IO) {
                     try { postToServer(item) } catch (_: Exception) {}
                 }
@@ -528,13 +529,19 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                         proximity = json.optDouble("proximity", 0.0).toFloat(),
                         timestamp = json.optLong("timestamp", System.currentTimeMillis()),
                         photoBase64 = json.optString("photoBase64", ""),
-                        isRemote = true
+                        isRemote = true // marks this as remote
                     )
 
                     lifecycleScope.launch(Dispatchers.Main) {
                         connectedRemoteDevices.add(0, remoteHistory)
                         historyManager.saveHistory(connectedRemoteDevices.toList())
                     }
+
+                    // post **only remote readings** to server automatically
+                    lifecycleScope.launch(Dispatchers.IO) {
+                        try { postToServer(remoteHistory) } catch (_: Exception) {}
+                    }
+
                 } catch (_: Exception) {}
                 line = input.readLine()
             }
