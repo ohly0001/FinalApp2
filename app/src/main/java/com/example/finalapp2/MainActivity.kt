@@ -347,15 +347,18 @@ class MainActivity : ComponentActivity(), SensorEventListener {
 
             if (scanningQr.value) {
                 QrScanner(
-                    onQrScanned = { scannedUuid ->
+                    onQrScanned = { scannedValue ->
                         scanningQr.value = false
                         try {
-                            remoteUuid = UUID.fromString(scannedUuid)
+                            val qrJson = JSONObject(scannedValue)
+                            val mac = qrJson.getString("mac")
+                            val uuid = UUID.fromString(qrJson.getString("uuid"))
+
                             lifecycleScope.launch(Dispatchers.IO) {
-                                connectToRemoteDevice(remoteUuid!!)
+                                connectToRemoteDevice(mac, uuid)
                             }
                         } catch (e: Exception) {
-                            Log.e("QR", "Invalid UUID scanned: ${e.localizedMessage}")
+                            Log.e("QR", "Invalid QR content: ${e.localizedMessage}")
                         }
                     },
                     onClose = { scanningQr.value = false }
@@ -365,38 +368,30 @@ class MainActivity : ComponentActivity(), SensorEventListener {
     }
 
     @RequiresPermission(Manifest.permission.BLUETOOTH_CONNECT)
-    fun connectToRemoteDevice(uuid: UUID) {
+    fun connectToRemoteDevice(mac: String, uuid: UUID) {
         try {
             val adapter = bluetoothAdapter ?: return
-
-            // Pick any bonded device for demo purposes
-            val device = adapter.bondedDevices.firstOrNull()
-                ?: run {
-                    Log.e("BT-Client", "No bonded devices found to connect")
-                    return
-                }
+            val device = adapter.getRemoteDevice(mac)
+            Log.i("BT-Client", "Connecting to device ${device.name} at $mac with UUID $uuid")
 
             clientSocket = device.createRfcommSocketToServiceRecord(uuid)
-            clientSocket?.connect()
 
+            // connect in IO dispatcher
+            clientSocket?.connect()
             Log.i("BT-Client", "Connected to ${device.name}")
             isClientActive.value = true
 
-            // Start streaming local sensors to the connected remote device
+            // start streaming local sensors
             lifecycleScope.launch(Dispatchers.IO) {
                 clientSocket?.let { socket ->
-                    try {
-                        streamLocalSensorsToRemote(socket)
-                    } catch (e: Exception) {
-                        Log.e("BT-Client", "Streaming failed: ${e.localizedMessage}")
-                        isClientActive.value = false
-                    }
+                    streamLocalSensorsToRemote(socket)
                 }
             }
 
         } catch (e: Exception) {
             Log.e("BT-Client", "Client connection failed: ${e.localizedMessage}")
             isClientActive.value = false
+            clientSocket?.close()
         }
     }
 
@@ -515,9 +510,14 @@ class MainActivity : ComponentActivity(), SensorEventListener {
             startBluetoothServer()
         }
 
-        // generate QR for UUID and show
+        // generate QR for UUID + MAC
         lifecycleScope.launch {
-            val bitmap = generateQrBitmap(appUuid.toString())
+            val macAddress = bluetoothAdapter.address ?: "00:00:00:00:00:00"
+            val qrJson = JSONObject().apply {
+                put("uuid", appUuid.toString())
+                put("mac", macAddress)
+            }
+            val bitmap = generateQrBitmap(qrJson.toString())
             qrBitmap = bitmap
             showQrDialog = true
         }
