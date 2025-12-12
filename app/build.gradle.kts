@@ -47,6 +47,7 @@ android {
 }
 
 dependencies {
+    implementation(libs.json)
     implementation(libs.core)
     implementation(libs.androidx.core.ktx)
     implementation(libs.androidx.lifecycle.runtime.ktx)

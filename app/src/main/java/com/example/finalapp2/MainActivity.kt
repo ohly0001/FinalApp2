@@ -86,13 +86,13 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import org.json.JSONObject
 import java.io.*
 import java.net.HttpURLConnection
 import java.net.URL
 import java.util.*
 import androidx.core.graphics.set
 import androidx.core.graphics.createBitmap
+import org.json.JSONObject
 
 data class SensorHistory(
     val deviceName: String,
@@ -263,15 +263,17 @@ class MainActivity : ComponentActivity(), SensorEventListener {
                 Manifest.permission.BLUETOOTH_CONNECT,
                 Manifest.permission.BLUETOOTH_ADVERTISE,
                 Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION,
                 Manifest.permission.CAMERA,
-                Manifest.permission.ACCESS_COARSE_LOCATION
+                Manifest.permission.INTERNET
             )
         } else {
             arrayOf(
                 Manifest.permission.BLUETOOTH,
                 Manifest.permission.BLUETOOTH_ADMIN,
                 Manifest.permission.ACCESS_FINE_LOCATION,
-                Manifest.permission.CAMERA
+                Manifest.permission.CAMERA,
+                Manifest.permission.INTERNET
             )
         }
 
